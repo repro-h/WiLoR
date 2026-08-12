@@ -70,6 +70,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--sequence-dir", required=True)
     parser.add_argument(
+        "--manifest",
+        default=None,
+        help=(
+            "Hybrid JSONL manifest used to resolve a QA/passed directory to "
+            "the original DexYCB stream containing color and label files."
+        ),
+    )
+    parser.add_argument(
         "--checkpoint", default="pretrained_models/wilor_final.ckpt"
     )
     parser.add_argument(
@@ -104,6 +112,68 @@ def resolve_path(path_string: str) -> Path:
 
 def frame_id(path: Path) -> str:
     return path.stem.rsplit("_", 1)[-1].zfill(6)
+
+
+def stream_id_from_path(path: Path) -> str:
+    if len(path.parts) < 3:
+        raise ValueError(f"Cannot infer stream ID from {path}")
+    return "__".join(path.parts[-3:])
+
+
+def has_color_frames(path: Path) -> bool:
+    return next(path.glob("color_*.jpg"), None) is not None or next(
+        path.glob("color_*.png"), None
+    ) is not None
+
+
+def resolve_raw_sequence_dir(
+    requested_dir: Path,
+    manifest_path: Path | None,
+) -> tuple[Path, dict[str, Any] | None]:
+    if has_color_frames(requested_dir):
+        return requested_dir, None
+    stream_id = stream_id_from_path(requested_dir)
+    if manifest_path is None:
+        raise FileNotFoundError(
+            f"No color_*.jpg/png frames in {requested_dir}. If this is a "
+            "FoundationPose QA/passed directory, pass --manifest pointing "
+            "to the hybrid split JSONL so the original DexYCB stream can be "
+            f"resolved for {stream_id}."
+        )
+    if not manifest_path.is_file():
+        raise FileNotFoundError(manifest_path)
+
+    matches = []
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"Invalid JSON at {manifest_path}:{line_number}"
+                ) from error
+            if record.get("stream_id") == stream_id:
+                matches.append(record)
+    if not matches:
+        raise KeyError(f"{stream_id} is not present in {manifest_path}")
+
+    raw_paths = {
+        str(Path(record["stream_dir"]).expanduser().resolve())
+        for record in matches
+        if record.get("stream_dir")
+    }
+    if len(raw_paths) != 1:
+        raise ValueError(
+            f"Expected one stream_dir for {stream_id}, found {sorted(raw_paths)}"
+        )
+    raw_dir = Path(raw_paths.pop())
+    if not raw_dir.is_dir():
+        raise FileNotFoundError(raw_dir)
+    if not has_color_frames(raw_dir):
+        raise FileNotFoundError(f"No color_*.jpg/png frames in {raw_dir}")
+    return raw_dir, matches[0]
 
 
 def read_hand_side(sequence_dir: Path, requested: str) -> str:
@@ -446,15 +516,16 @@ def main() -> None:
     args = parse_args()
     if args.rescale_factor <= 0:
         raise ValueError("--rescale-factor must be positive")
-    sequence_dir = resolve_path(args.sequence_dir)
+    requested_sequence_dir = resolve_path(args.sequence_dir)
+    manifest = resolve_path(args.manifest) if args.manifest else None
     checkpoint = resolve_path(args.checkpoint)
     config = resolve_path(args.config)
     mano_data_dir = (
         resolve_path(args.mano_data_dir) if args.mano_data_dir else None
     )
     out_dir = resolve_path(args.out_dir)
-    if not sequence_dir.is_dir():
-        raise FileNotFoundError(sequence_dir)
+    if not requested_sequence_dir.is_dir():
+        raise FileNotFoundError(requested_sequence_dir)
     if not checkpoint.is_file():
         raise FileNotFoundError(checkpoint)
     if not config.is_file():
@@ -465,6 +536,9 @@ def main() -> None:
         raise FileNotFoundError(mano_data_dir / "MANO_RIGHT.pkl")
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    sequence_dir, manifest_record = resolve_raw_sequence_dir(
+        requested_sequence_dir, manifest
+    )
     hand_side = read_hand_side(sequence_dir, args.hand_side)
     records, skipped = build_records(sequence_dir, args.max_frames)
     os.chdir(REPO_ROOT)
@@ -628,7 +702,15 @@ def main() -> None:
     else:
         recommendation = "joint_refinement_is_low_priority"
     report = {
+        "requested_sequence_dir": str(requested_sequence_dir),
         "sequence_dir": str(sequence_dir),
+        "stream_id": stream_id_from_path(sequence_dir),
+        "manifest": str(manifest) if manifest is not None else None,
+        "manifest_hand_side": (
+            manifest_record.get("hand_side")
+            if manifest_record is not None
+            else None
+        ),
         "checkpoint": str(checkpoint),
         "config": str(config),
         "mano_data_dir": (
