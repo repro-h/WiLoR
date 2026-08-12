@@ -109,8 +109,11 @@ def frame_id(path: Path) -> str:
 def read_hand_side(sequence_dir: Path, requested: str) -> str:
     if requested != "auto":
         return requested
-    candidates = [sequence_dir.parent / "meta.yml"]
-    candidates.extend(parent / "meta.yml" for parent in sequence_dir.parents[:4])
+    candidates = []
+    for index, parent in enumerate(sequence_dir.parents):
+        if index >= 4:
+            break
+        candidates.append(parent / "meta.yml")
     for path in candidates:
         if not path.is_file():
             continue
