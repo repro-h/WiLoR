@@ -2,6 +2,8 @@
 Parts of the code are taken or adapted from
 https://github.com/mkocabas/EpipolarPose/blob/master/lib/utils/img_utils.py
 """
+from __future__ import annotations
+
 import torch
 import numpy as np
 from skimage.transform import rotate, resize
