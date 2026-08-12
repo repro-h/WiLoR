@@ -97,4 +97,6 @@ class ViTDetDataset(torch.utils.data.Dataset):
         item['box_size'] = bbox_size
         item['img_size'] = 1.0 * np.array([cvimg.shape[1], cvimg.shape[0]])
         item['right'] = self.right[idx].copy()
+        item['crop_transform'] = trans.astype(np.float32)
+        item['crop_size'] = np.float32(self.img_size)
         return item

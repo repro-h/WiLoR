@@ -4,13 +4,22 @@ from typing import Any, Dict, Mapping, Tuple
 
 from yacs.config import CfgNode
 
-from ..utils import SkeletonRenderer, MeshRenderer
+from ..utils import (
+    MeshRenderer,
+    SkeletonRenderer,
+    keypoints_2d_crop_from_batch,
+)
 from ..utils.geometry import aa_to_rotmat, perspective_projection
 from ..utils.pylogger import get_pylogger
 from .backbones import create_backbone
-from .heads import RefineNet
+from .heads import JointRefinementHead, RefineNet
 from .discriminator import Discriminator
-from .losses import Keypoint3DLoss, Keypoint2DLoss, ParameterLoss
+from .losses import (
+    JointRefinementLoss,
+    Keypoint3DLoss,
+    Keypoint2DLoss,
+    ParameterLoss,
+)
 from . import MANO
 
 log = get_pylogger(__name__)
@@ -37,6 +46,27 @@ class WiLoR(pl.LightningModule):
             
         # Create RefineNet head
         self.refine_net = RefineNet(cfg, feat_dim=1280, upscale=3)
+
+        joint_cfg = cfg.MODEL.JOINT_REFINEMENT
+        self.joint_refinement_enabled = bool(joint_cfg.ENABLED)
+        if self.joint_refinement_enabled:
+            self.joint_refinement_head = JointRefinementHead(
+                feature_dim=1280,
+                hidden_dim=int(joint_cfg.HIDDEN_DIM),
+                num_joints=int(joint_cfg.NUM_JOINTS),
+                window_size=int(joint_cfg.WINDOW_SIZE),
+                search_radius=float(joint_cfg.SEARCH_RADIUS),
+                crop_size=int(cfg.MODEL.IMAGE_SIZE),
+                backbone_width=int(joint_cfg.BACKBONE_WIDTH),
+                temperature=float(joint_cfg.TEMPERATURE),
+            )
+            self.joint_refinement_loss = JointRefinementLoss(
+                smooth_l1_beta=float(joint_cfg.SMOOTH_L1_BETA),
+                heatmap_sigma=float(joint_cfg.HEATMAP_SIGMA),
+                uv_weight=float(joint_cfg.UV_LOSS_WEIGHT),
+                heatmap_weight=float(joint_cfg.HEATMAP_LOSS_WEIGHT),
+                delta_weight=float(joint_cfg.DELTA_LOSS_WEIGHT),
+            )
         
         # Create discriminator
         if self.cfg.LOSS_WEIGHTS.ADVERSARIAL > 0:
@@ -75,6 +105,8 @@ class WiLoR(pl.LightningModule):
     def get_parameters(self):
         #all_params = list(self.mano_head.parameters())
         all_params = list(self.backbone.parameters())
+        if self.joint_refinement_enabled:
+            all_params += list(self.joint_refinement_head.parameters())
         return all_params
 
     def configure_optimizers(self) -> Tuple[torch.optim.Optimizer, torch.optim.Optimizer]:
@@ -156,6 +188,22 @@ class WiLoR(pl.LightningModule):
                                                    translation=pred_cam_t,
                                                    focal_length=focal_length / self.cfg.MODEL.IMAGE_SIZE)
         output['pred_keypoints_2d'] = pred_keypoints_2d.reshape(batch_size, -1, 2)
+        output['pred_keypoints_2d_prior'] = output['pred_keypoints_2d']
+        output['pred_keypoints_2d_query'] = output['pred_keypoints_2d']
+
+        if self.joint_refinement_enabled:
+            joint_cfg = self.cfg.MODEL.JOINT_REFINEMENT
+            num_joints = int(joint_cfg.NUM_JOINTS)
+            prior_uv = output['pred_keypoints_2d'][:, :num_joints]
+            features = vit_out
+            if bool(joint_cfg.DETACH_PRIOR):
+                prior_uv = prior_uv.detach()
+            if bool(joint_cfg.DETACH_FEATURES):
+                features = features.detach()
+            refinement = self.joint_refinement_head(features, prior_uv)
+            output['joint_refinement'] = refinement
+            output['pred_keypoints_2d_refined'] = refinement['refined_uv']
+            output['pred_keypoints_2d_query'] = refinement['refined_uv']
         
         return output
 
@@ -180,7 +228,9 @@ class WiLoR(pl.LightningModule):
         dtype = pred_mano_params['hand_pose'].dtype
 
         # Get annotations
-        gt_keypoints_2d = batch['keypoints_2d']
+        gt_keypoints_2d = keypoints_2d_crop_from_batch(
+            batch, self.cfg.MODEL.IMAGE_SIZE
+        )
         gt_keypoints_3d = batch['keypoints_3d']
         gt_mano_params = batch['mano_params']
         has_mano_params = batch['has_mano_params']
@@ -189,6 +239,18 @@ class WiLoR(pl.LightningModule):
         # Compute 3D keypoint loss
         loss_keypoints_2d = self.keypoint_2d_loss(pred_keypoints_2d, gt_keypoints_2d)
         loss_keypoints_3d = self.keypoint_3d_loss(pred_keypoints_3d, gt_keypoints_3d, pelvis_id=0)
+
+        if self.joint_refinement_enabled:
+            refinement_losses = self.joint_refinement_loss(
+                output['joint_refinement'], gt_keypoints_2d
+            )
+            loss_joint_refinement = (
+                float(self.cfg.MODEL.JOINT_REFINEMENT.LOSS_WEIGHT)
+                * refinement_losses['loss']
+            )
+        else:
+            refinement_losses = None
+            loss_joint_refinement = pred_keypoints_2d.sum() * 0.0
 
         # Compute loss on MANO parameters
         loss_mano_params = {}
@@ -201,12 +263,17 @@ class WiLoR(pl.LightningModule):
 
         loss = self.cfg.LOSS_WEIGHTS['KEYPOINTS_3D'] * loss_keypoints_3d+\
                self.cfg.LOSS_WEIGHTS['KEYPOINTS_2D'] * loss_keypoints_2d+\
+               loss_joint_refinement+\
                sum([loss_mano_params[k] * self.cfg.LOSS_WEIGHTS[k.upper()] for k in loss_mano_params])
 
 
         losses = dict(loss=loss.detach(),
                       loss_keypoints_2d=loss_keypoints_2d.detach(),
                       loss_keypoints_3d=loss_keypoints_3d.detach())
+
+        if refinement_losses is not None:
+            for name, value in refinement_losses.items():
+                losses['loss_joint_refinement_' + name] = value.detach()
 
         for k, v in loss_mano_params.items():
             losses['loss_' + k] = v.detach()
@@ -228,7 +295,10 @@ class WiLoR(pl.LightningModule):
         """
 
         mode = 'train' if train else 'val'
-        batch_size = batch['keypoints_2d'].shape[0]
+        gt_keypoints_2d = keypoints_2d_crop_from_batch(
+            batch, self.cfg.MODEL.IMAGE_SIZE
+        )
+        batch_size = gt_keypoints_2d.shape[0]
         images = batch['img']
         images = images * torch.tensor([0.229, 0.224, 0.225], device=images.device).reshape(1,3,1,1)
         images = images + torch.tensor([0.485, 0.456, 0.406], device=images.device).reshape(1,3,1,1)
@@ -238,7 +308,6 @@ class WiLoR(pl.LightningModule):
         pred_vertices = output['pred_vertices'].detach().reshape(batch_size, -1, 3)
         focal_length = output['focal_length'].detach().reshape(batch_size, 2)
         gt_keypoints_3d = batch['keypoints_3d']
-        gt_keypoints_2d = batch['keypoints_2d']
         
         losses = output['losses']
         pred_cam_t = output['pred_cam_t'].detach().reshape(batch_size, 3)

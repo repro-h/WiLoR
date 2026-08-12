@@ -3,7 +3,12 @@ from .wilor import WiLoR
 
 from .discriminator import Discriminator
 
-def load_wilor(checkpoint_path, cfg_path):
+def load_wilor(
+    checkpoint_path,
+    cfg_path,
+    init_renderer=True,
+    mano_data_dir=None,
+):
     from pathlib import Path
     from wilor.configs import get_config
     print('Loading ', checkpoint_path)
@@ -26,11 +31,17 @@ def load_wilor(checkpoint_path, cfg_path):
         # Update config to be compatible with demo
 
     if ('DATA_DIR' in model_cfg.MANO):
+        mano_data_dir = mano_data_dir or './mano_data/'
         model_cfg.defrost()
-        model_cfg.MANO.DATA_DIR    = './mano_data/'
-        model_cfg.MANO.MODEL_PATH  = './mano_data/'
+        model_cfg.MANO.DATA_DIR    = str(mano_data_dir)
+        model_cfg.MANO.MODEL_PATH  = str(mano_data_dir)
         model_cfg.MANO.MEAN_PARAMS = './mano_data/mano_mean_params.npz'
         model_cfg.freeze()
 
-    model = WiLoR.load_from_checkpoint(checkpoint_path, strict=False, cfg=model_cfg)
+    model = WiLoR.load_from_checkpoint(
+        checkpoint_path,
+        strict=False,
+        cfg=model_cfg,
+        init_renderer=init_renderer,
+    )
     return model, model_cfg
