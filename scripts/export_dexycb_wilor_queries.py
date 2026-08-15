@@ -414,6 +414,12 @@ def export_stream(
     joints_uv_original = np.full((frames, 21, 2), np.nan, dtype=np.float32)
     joints_root_canonical = np.full((frames, 21, 3), np.nan, dtype=np.float32)
     joints_root_original = np.full((frames, 21, 3), np.nan, dtype=np.float32)
+    vertices_root_canonical = np.full(
+        (frames, 778, 3), np.nan, dtype=np.float32
+    )
+    vertices_root_original = np.full(
+        (frames, 778, 3), np.nan, dtype=np.float32
+    )
     crop_transform = np.full((frames, 2, 3), np.nan, dtype=np.float32)
     crop_box_center = np.full((frames, 2), np.nan, dtype=np.float32)
     crop_box_size = np.full(frames, np.nan, dtype=np.float32)
@@ -462,15 +468,20 @@ def export_stream(
                 joints_3d = output["pred_keypoints_3d"][:, :21]
                 root = joints_3d[:, :1]
                 joints_local = joints_3d - root
+                vertices_local = output["pred_vertices"] - root
                 multiplier = (2.0 * device_batch["right"] - 1.0).reshape(-1, 1)
                 joints_original = joints_local.clone()
                 joints_original[..., 0] *= multiplier
+                vertices_original = vertices_local.clone()
+                vertices_original[..., 0] *= multiplier
 
                 chunks = {
                     "query_crop": query_crop.float().cpu().numpy(),
                     "query_full": query_full.float().cpu().numpy(),
                     "joints_local": joints_local.float().cpu().numpy(),
                     "joints_original": joints_original.float().cpu().numpy(),
+                    "vertices_local": vertices_local.float().cpu().numpy(),
+                    "vertices_original": vertices_original.float().cpu().numpy(),
                     "crop_transform": device_batch["crop_transform"].float().cpu().numpy(),
                     "box_center": device_batch["box_center"].float().cpu().numpy(),
                     "box_size": device_batch["box_size"].float().cpu().numpy(),
@@ -485,6 +496,8 @@ def export_stream(
                 joints_uv_original[good_indices] = chunks["query_full"][finite]
                 joints_root_canonical[good_indices] = chunks["joints_local"][finite]
                 joints_root_original[good_indices] = chunks["joints_original"][finite]
+                vertices_root_canonical[good_indices] = chunks["vertices_local"][finite]
+                vertices_root_original[good_indices] = chunks["vertices_original"][finite]
                 crop_transform[good_indices] = chunks["crop_transform"][finite]
                 crop_box_center[good_indices] = chunks["box_center"][finite]
                 crop_box_size[good_indices] = chunks["box_size"][finite]
@@ -561,6 +574,9 @@ def export_stream(
         "joint_query_confidence": joint_query_confidence,
         "joints_3d_root_relative_canonical_right": joints_root_canonical,
         "joints_3d_root_relative_original": joints_root_original,
+        "vertices_3d_root_relative_canonical_right": vertices_root_canonical,
+        "vertices_3d_root_relative_original": vertices_root_original,
+        "mano_faces": np.asarray(model.mano.faces, dtype=np.int64),
         "crop_transform_canonical_right_to_crop": crop_transform,
         "crop_box_center_original": crop_box_center,
         "crop_box_size": crop_box_size,
@@ -579,6 +595,7 @@ def export_stream(
         ),
         "joint_visibility_estimated": np.asarray(False),
         "joints_3d_unit": np.asarray("meters"),
+        "vertices_3d_unit": np.asarray("meters"),
         "detector_confidence_threshold": np.float32(args.detector_confidence),
         "crop_rescale_factor": np.float32(args.rescale_factor),
         "absolute_camera_translation_exported": np.asarray(False),
