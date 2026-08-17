@@ -37,7 +37,7 @@ from wilor.utils import (  # noqa: E402
 )
 
 
-CACHE_VERSION = "dexycb_wilor_query_cache_v1"
+CACHE_VERSION = "dexycb_wilor_query_cache_v2_mano_params"
 JOINT_NAMES = (
     "wrist",
     "thumb_mcp",
@@ -420,6 +420,13 @@ def export_stream(
     vertices_root_original = np.full(
         (frames, 778, 3), np.nan, dtype=np.float32
     )
+    mano_global_orient = np.full(
+        (frames, 1, 3, 3), np.nan, dtype=np.float32
+    )
+    mano_hand_pose = np.full(
+        (frames, 15, 3, 3), np.nan, dtype=np.float32
+    )
+    mano_betas = np.full((frames, 10), np.nan, dtype=np.float32)
     crop_transform = np.full((frames, 2, 3), np.nan, dtype=np.float32)
     crop_box_center = np.full((frames, 2), np.nan, dtype=np.float32)
     crop_box_size = np.full(frames, np.nan, dtype=np.float32)
@@ -474,6 +481,7 @@ def export_stream(
                 joints_original[..., 0] *= multiplier
                 vertices_original = vertices_local.clone()
                 vertices_original[..., 0] *= multiplier
+                mano_params = output["pred_mano_params"]
 
                 chunks = {
                     "query_crop": query_crop.float().cpu().numpy(),
@@ -482,6 +490,13 @@ def export_stream(
                     "joints_original": joints_original.float().cpu().numpy(),
                     "vertices_local": vertices_local.float().cpu().numpy(),
                     "vertices_original": vertices_original.float().cpu().numpy(),
+                    "mano_global_orient": (
+                        mano_params["global_orient"].float().cpu().numpy()
+                    ),
+                    "mano_hand_pose": (
+                        mano_params["hand_pose"].float().cpu().numpy()
+                    ),
+                    "mano_betas": mano_params["betas"].float().cpu().numpy(),
                     "crop_transform": device_batch["crop_transform"].float().cpu().numpy(),
                     "box_center": device_batch["box_center"].float().cpu().numpy(),
                     "box_size": device_batch["box_size"].float().cpu().numpy(),
@@ -498,6 +513,9 @@ def export_stream(
                 joints_root_original[good_indices] = chunks["joints_original"][finite]
                 vertices_root_canonical[good_indices] = chunks["vertices_local"][finite]
                 vertices_root_original[good_indices] = chunks["vertices_original"][finite]
+                mano_global_orient[good_indices] = chunks["mano_global_orient"][finite]
+                mano_hand_pose[good_indices] = chunks["mano_hand_pose"][finite]
+                mano_betas[good_indices] = chunks["mano_betas"][finite]
                 crop_transform[good_indices] = chunks["crop_transform"][finite]
                 crop_box_center[good_indices] = chunks["box_center"][finite]
                 crop_box_size[good_indices] = chunks["box_size"][finite]
@@ -576,6 +594,9 @@ def export_stream(
         "joints_3d_root_relative_original": joints_root_original,
         "vertices_3d_root_relative_canonical_right": vertices_root_canonical,
         "vertices_3d_root_relative_original": vertices_root_original,
+        "mano_global_orient_canonical_right": mano_global_orient,
+        "mano_hand_pose_canonical_right": mano_hand_pose,
+        "mano_betas": mano_betas,
         "mano_faces": np.asarray(model.mano.faces, dtype=np.int64),
         "crop_transform_canonical_right_to_crop": crop_transform,
         "crop_box_center_original": crop_box_center,
